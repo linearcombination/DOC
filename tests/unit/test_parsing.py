@@ -5,8 +5,10 @@ from doc.domain.parsing import (
     ensure_chapter_label,
     ensure_chapter_marker,
     maybe_localized_book_name,
+    split_chapter_into_verses_with_formatting,
 )
 from doc.domain import model, resource_lookup
+from doc.domain.model import USFMChapter
 
 
 def test_ensure_chapter_marker_unchanged_if_exists() -> None:
@@ -100,6 +102,63 @@ def test_fr_f10_book_name_lookup_prefs() -> None:
     localized_book_name = maybe_localized_book_name(usfm_metadata, "fr", "f10")
     assert localized_book_name != "Épître de saint jude"
     assert localized_book_name == expected
+
+
+def test_split_chapter_into_verses_with_formatting_multiple_verses() -> None:
+    html_content = """
+    <span class="verse">
+    <sup class="versemarker">1</sup>
+    Paul, an apostle of Christ Jesus by the will of God, to the saints in Ephesus.
+    </span>
+    <span class="verse">
+    <sup class="versemarker">2</sup>
+    Grace to you and peace from God our Father and the Lord Jesus Christ.
+    </span>
+    """
+    chapter = USFMChapter(content=html_content, verses=None)
+    verse_dict = split_chapter_into_verses_with_formatting(chapter)
+
+    assert set(verse_dict.keys()) == {"1", "2"}
+    assert "versemarker" not in verse_dict["1"]
+    assert "versemarker" not in verse_dict["2"]
+    assert "Paul, an apostle" in verse_dict["1"]
+    assert "Grace to you and peace" in verse_dict["2"]
+
+
+def test_split_chapter_into_verses_with_formatting_unwraps_word_entry() -> None:
+    html_content = """
+    <span class="verse">
+    <sup class="versemarker">3</sup>
+    <span class="word-entry">Blessed</span> be the God and Father of our Lord Jesus Christ.
+    </span>
+    """
+    chapter = USFMChapter(content=html_content, verses=None)
+    verse_dict = split_chapter_into_verses_with_formatting(chapter)
+
+    assert "3" in verse_dict
+    assert "Blessed" in verse_dict["3"]
+    assert "word-entry" not in verse_dict["3"]
+    assert '<span class="word-entry">' not in verse_dict["3"]
+
+
+def test_split_chapter_into_verses_with_formatting_skips_missing_versemarker() -> None:
+    html_content = """
+    <span class="verse">
+    <sup class="versemarker">4</sup>
+    In him we have redemption through his blood.
+    </span>
+    <span class="verse">
+    According to the riches of his grace.
+    </span>
+    <span class="verse">
+    <sup class="versemarker"></sup>
+    Which he lavished upon us.
+    </span>
+    """
+    chapter = USFMChapter(content=html_content, verses=None)
+    verse_dict = split_chapter_into_verses_with_formatting(chapter)
+
+    assert set(verse_dict.keys()) == {"4"}
 
 
 if __name__ == "__main__":
