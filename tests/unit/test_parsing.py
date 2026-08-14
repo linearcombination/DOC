@@ -1,14 +1,11 @@
-import re
-
 import pytest
+from doc.domain.model import USFMChapter
 from doc.domain.parsing import (
     ensure_chapter_label,
     ensure_chapter_marker,
     maybe_localized_book_name,
     split_chapter_into_verses_with_formatting,
 )
-from doc.domain import model, resource_lookup
-from doc.domain.model import USFMChapter
 
 
 def test_ensure_chapter_marker_unchanged_if_exists() -> None:
