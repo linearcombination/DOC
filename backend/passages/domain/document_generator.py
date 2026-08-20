@@ -19,12 +19,12 @@ from doc.domain.resource_lookup import (
     resource_types,
 )
 from doc.reviewers_guide.model import BibleReference
+from doc.utils.docx_util import ensure_reference_styles
 from doc.utils.file_utils import docx_filepath, file_needs_update
 from doc.utils.text_utils import maybe_correct_book_name
-from doc.utils.docx_util import ensure_reference_styles
 from docx import Document
 from docx.oxml import parse_xml
-from docx.shared import Inches, RGBColor
+from docx.shared import Inches, Length, RGBColor
 from docx.table import _Cell, _Row
 from html4docx import HtmlToDocx  # type: ignore
 from passages.domain.model import (
@@ -245,13 +245,17 @@ def generate_docx(
     available_reference_style_name: str = "AvailableReference",
     unavailable_reference_style_name: str = "UnavailableReference",
     unavailable_color: RGBColor = UNAVAILABLE_COLOR,
-    total_width: int = Inches(7.0),
-    document_margin_width: float = Inches(0.75),
+    document_margin_width: Length = Inches(0.75),
+    a4_width: Length = Inches(8.27),
+    a4_height: Length = Inches(11.69),
 ) -> None:
     doc = Document()
     section = doc.sections[0]
-    section.left_margin = Inches(0.75)
-    section.right_margin = Inches(0.75)
+    section.page_width = a4_width
+    section.page_height = a4_height
+    section.left_margin = document_margin_width
+    section.right_margin = document_margin_width
+    printable_width: Length = Length(int(a4_width - (document_margin_width * 2)))
     ensure_reference_styles(doc, unavailable_color=unavailable_color)
     html_to_docx = HtmlToDocx()
     has_lang1 = lang1_code is not None and lang1_name is not None
@@ -265,19 +269,33 @@ def generate_docx(
         columns.append("lang1")
     if show_notes_column:
         columns.append("notes")
+    col_widths: list[Length] = []
     if columns == ["lang0"]:
-        col_widths = [total_width]
+        col_widths = [printable_width]
     elif columns == ["lang0", "lang1"]:
-        col_widths = [Inches(3.5), Inches(3.5)]
+        col_widths = [
+            Length(int(printable_width * 0.5)),
+            Length(int(printable_width * 0.5)),
+        ]
     elif columns == ["lang0", "notes"]:
-        col_widths = [Inches(4.5), Inches(2.5)]
+        col_widths = [
+            Length(int(printable_width * 0.65)),
+            Length(int(printable_width * 0.35)),
+        ]
     elif columns == ["lang0", "lang1", "notes"]:
-        col_widths = [Inches(3.0), Inches(3.0), Inches(1.0)]
+        col_widths = [
+            Length(int(printable_width * 0.42)),
+            Length(int(printable_width * 0.42)),
+            Length(int(printable_width * 0.16)),
+        ]
     else:
         logger.warning(f"Unexpected column configuration: {columns}")
+        num_cols = len(columns)
+        col_widths = [Length(int(printable_width * (1.0 / num_cols))) for _ in columns]
     table = doc.add_table(rows=0, cols=len(columns))
     table.autofit = False
     table.allow_autofit = False
+    table.width = printable_width
     for i, w in enumerate(col_widths):
         table.columns[i].width = w
     col_index = {name: i for i, name in enumerate(columns)}
@@ -288,6 +306,8 @@ def generate_docx(
     )
     for p0, p1 in pairs:
         row = table.add_row()
+        for i, w in enumerate(col_widths):
+            row.cells[i].width = w
         cell = row.cells[col_index["lang0"]]
         run = cell.add_paragraph().add_run(p0.localized_reference)
         run.style = (
