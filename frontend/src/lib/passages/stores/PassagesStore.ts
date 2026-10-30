@@ -5,6 +5,12 @@ import type { BibleReference } from '../models'
 export const passagesStore = writable<BibleReference[]>([])
 export const availablePassagesStore = writable<BibleReference[]>([])
 
+// Passages chosen no longer correspond once the chosen languages change
+export function clearPassages() {
+  passagesStore.set([])
+  availablePassagesStore.set([])
+}
+
 export function addBibleReference(ref: BibleReference) {
   passagesStore.update((currentPassages) => {
     // Check if the passage already exists
