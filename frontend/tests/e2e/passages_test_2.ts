@@ -90,7 +90,8 @@ test('language change changes passages chosen', async ({ page }) => {
   await expect(page.getByTestId('shown-passages')).toContainText('Matthew 2:1-12 (en)')
   await page.getByRole('button', { name: 'Edit' }).click()
   await page.locator('div:nth-child(4) > button').click()
-  await expect(page.getByTestId('shown-passages')).not.toContainText('Matthew 2:1-12')
+  // The passages basket is not rendered at all once passages are cleared
+  await expect(page.getByTestId('shown-passages')).toHaveCount(0)
 })
 
 test('backtracking to language step without changing languages keeps passages', async ({
