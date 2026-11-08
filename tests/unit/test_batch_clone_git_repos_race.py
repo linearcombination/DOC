@@ -23,7 +23,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from doc.domain.resource_lookup import batch_clone_git_repos
+from doc.domain.resource_lookup import (
+    batch_clone_git_repos,
+    clone_git_repos_until_complete,
+)
 from filelock import FileLock
 
 pytestmark = pytest.mark.slow
@@ -211,3 +214,95 @@ def test_lock_contention_skips_cleanly_and_leaves_existing_content_untouched(
     assert skipped == [str(dest)]
     after = sorted(os.listdir(dest))
     assert after == before
+
+
+def _hold_lock_and_clone_worker(
+    repo_url: str, dest: str, hold_seconds: float, ready: Any
+) -> None:
+    lock = FileLock(dest + ".lock", timeout=5)
+    with lock:
+        ready.set()
+        time.sleep(hold_seconds)
+        subprocess.check_call(["git", "clone", "-q", "--depth=1", repo_url, dest])
+
+
+def test_skipped_repo_resolved_by_other_process_is_not_recloned(
+    tmp_path: Path,
+) -> None:
+    """The lock holder completes the clone; the retry sees a fresh, complete
+    repo and leaves it untouched."""
+    bare_repo = tmp_path / "remote.git"
+    _make_bare_repo_with_content(bare_repo, 4)
+    repo_url = f"file://{bare_repo}"
+    dest = str(tmp_path / "dest_repo")
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    holder = ctx.Process(
+        target=_hold_lock_and_clone_worker, args=(repo_url, dest, 2.0, ready)
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    clone_git_repos_until_complete(
+        [(repo_url, dest)],  # type: ignore[list-item]
+        lock_timeout_seconds=1,
+    )
+    holder.join(timeout=10)
+    assert holder.exitcode == 0
+
+    marker = Path(dest) / "marker_from_holder_clone.txt"
+    # Proves the retry did not rmtree/reclone: marker added after the
+    # holder's clone must survive a second call.
+    marker.write_text("x")
+    clone_git_repos_until_complete(
+        [(repo_url, dest)],  # type: ignore[list-item]
+        lock_timeout_seconds=1,
+    )
+    assert marker.exists()
+    assert len([n for n in os.listdir(dest) if n.startswith("file")]) == 4
+
+
+def test_skipped_repo_is_cloned_by_this_process_after_holder_releases(
+    tmp_path: Path,
+) -> None:
+    """The lock holder releases without cloning (e.g. it died); the retry
+    performs the clone itself."""
+    bare_repo = tmp_path / "remote.git"
+    _make_bare_repo_with_content(bare_repo, 4)
+    repo_url = f"file://{bare_repo}"
+    dest = str(tmp_path / "dest_repo")
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    holder = ctx.Process(target=_hold_lock_worker, args=(dest + ".lock", 2.0, ready))
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    clone_git_repos_until_complete(
+        [(repo_url, dest)],  # type: ignore[list-item]
+        lock_timeout_seconds=1,
+    )
+    holder.join(timeout=10)
+    assert holder.exitcode == 0
+
+    assert os.path.isdir(os.path.join(dest, ".git"))
+    assert len([n for n in os.listdir(dest) if n.startswith("file")]) == 4
+
+
+def test_contention_beyond_ceiling_raises_instead_of_proceeding(
+    tmp_path: Path,
+) -> None:
+    dest = str(tmp_path / "dest_repo")
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    holder = ctx.Process(target=_hold_lock_worker, args=(dest + ".lock", 3.0, ready))
+    holder.start()
+    assert ready.wait(timeout=5)
+    with pytest.raises(TimeoutError):
+        clone_git_repos_until_complete(
+            [("file:///nonexistent-remote.git", dest)],  # type: ignore[list-item]
+            max_wait_seconds=1,
+            lock_timeout_seconds=1,
+        )
+    holder.join(timeout=10)

@@ -7,6 +7,7 @@ assets.
 import re
 import shutil
 import subprocess
+import time
 from datetime import datetime, timedelta
 from os import scandir, stat
 from os.path import exists, isdir, join
@@ -407,7 +408,7 @@ def resource_types(
         if download_assets:
             batch_download_repos(repos_to_clone_)
         else:
-            batch_clone_git_repos(repos_to_clone_)
+            clone_git_repos_until_complete(repos_to_clone_)
         resource_types_ = get_resource_types(repo_clone_list, book_codes)
     except Exception:
         logger.exception("Failed due to the following exception.")
@@ -471,6 +472,53 @@ def batch_download_repos(
         )
 
 
+# Generous ceiling on how long a request will keep waiting behind other
+# processes' in-flight clones of the same repos. Normally a contended repo is
+# resolved as soon as the holder finishes (or dies, releasing its lock).
+CLONE_CONTENTION_CEILING_SECONDS: int = 30 * 60
+
+
+def clone_git_repos_until_complete(
+    repos: list[tuple[HttpUrl, str]],
+    max_wait_seconds: int = CLONE_CONTENTION_CEILING_SECONDS,
+    lock_timeout_seconds: int = settings.LOCK_TIMEOUT_SECONDS,
+) -> None:
+    """
+    Clone repos, then keep retrying any that batch_clone_git_repos skipped
+    because another process held their lock, until all are cloned.
+
+    A skip means another process is (normally) cloning that repo right now.
+    On retry, once the holder has finished, the staleness check sees a
+    complete, fresh clone and does no work; if the holder died, its lock was
+    released and this process performs the clone itself. We never return
+    with a missing or partial repo. If max_wait_seconds elapses with repos
+    still contended, we log clearly and raise TimeoutError rather than let
+    callers proceed with partial assets.
+    """
+    deadline = time.monotonic() + max_wait_seconds
+    pending = repos
+    attempt = 0
+    while pending:
+        attempt += 1
+        skipped_paths = set(
+            batch_clone_git_repos(pending, lock_timeout_seconds=lock_timeout_seconds)
+        )
+        if not skipped_paths:
+            return
+        pending = [(url, path) for url, path in pending if path in skipped_paths]
+        if time.monotonic() >= deadline:
+            logger.error(
+                f"Gave up after {max_wait_seconds}s waiting on {len(pending)} repo(s) "
+                f"locked by other processes: {sorted(skipped_paths)}"
+            )
+            raise TimeoutError(
+                f"Timed out waiting for other processes to finish cloning: {sorted(skipped_paths)}"
+            )
+        logger.info(
+            f"Retrying {len(pending)} contended repo(s) (attempt {attempt + 1}): {sorted(skipped_paths)}"
+        )
+
+
 # @worker.app.task
 def batch_clone_git_repos(
     repos: list[tuple[HttpUrl, str]],
@@ -496,7 +544,8 @@ def batch_clone_git_repos(
     a caller waits behind another in-flight clone of the same repo before
     giving up on that repo for this request; repos that time out are
     skipped (left untouched) rather than raising, and their paths are
-    returned so a caller can decide whether/how to react.
+    returned; callers should use clone_git_repos_until_complete, which
+    retries them until cloned.
     """
     skipped_resource_filepaths: list[str] = []
     for url, resource_filepath in repos:
@@ -763,7 +812,7 @@ def get_book_codes_for_lang(
         if download_assets:
             batch_download_repos(repos_to_clone_)
         else:
-            batch_clone_git_repos(repos_to_clone_)
+            clone_git_repos_until_complete(repos_to_clone_)
         book_codes_and_names = get_book_codes_for_lang_(
             repo_clone_list,
             lang_code,
