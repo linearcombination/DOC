@@ -472,41 +472,56 @@ def batch_download_repos(
         )
 
 
-# Generous ceiling on how long a request will keep waiting behind other
-# processes' in-flight clones of the same repos. Normally a contended repo is
-# resolved as soon as the holder finishes (or dies, releasing its lock).
-CLONE_CONTENTION_CEILING_SECONDS: int = 30 * 60
+# Last-resort backstop on how long one request keeps retrying repos locked by
+# other processes' in-flight clones. The app runs under gunicorn's default
+# sync worker class with TIMEOUT=120s (backend/gunicorn.conf.py); a worker
+# blocked longer than that is killed, so stay comfortably below it.
+CLONE_CONTENTION_CEILING_SECONDS: int = 75
+CLONE_RETRY_INITIAL_SLEEP_SECONDS: float = 0.5
+CLONE_RETRY_MAX_SLEEP_SECONDS: float = 5.0
 
 
 def clone_git_repos_until_complete(
     repos: list[tuple[HttpUrl, str]],
-    max_wait_seconds: int = CLONE_CONTENTION_CEILING_SECONDS,
+    max_wait_seconds: float = CLONE_CONTENTION_CEILING_SECONDS,
     lock_timeout_seconds: int = settings.LOCK_TIMEOUT_SECONDS,
+    asset_caching_enabled: bool = settings.ASSET_CACHING_ENABLED,
 ) -> None:
     """
     Clone repos, then keep retrying any that batch_clone_git_repos skipped
-    because another process held their lock, until all are cloned.
+    because another process held their lock, sleeping with exponential
+    backoff between attempts, until all are cloned.
 
     A skip means another process is (normally) cloning that repo right now.
-    On retry, once the holder has finished, the staleness check sees a
-    complete, fresh clone and does no work; if the holder died, its lock was
-    released and this process performs the clone itself. We never return
-    with a missing or partial repo. If max_wait_seconds elapses with repos
-    still contended, we log clearly and raise TimeoutError rather than let
-    callers proceed with partial assets.
+    Retries always use the caching-aware staleness check, even if caching is
+    disabled for the first pass: once the holder has finished, the repo is
+    complete and fresh so the retry does no work rather than re-cloning what
+    a peer just cloned. If the holder died, its lock was released and the
+    retry clones the repo itself. We never return with a missing or partial
+    repo. If max_wait_seconds elapses with repos still contended (a
+    last-resort backstop kept below the gunicorn worker timeout), we log
+    clearly and raise TimeoutError rather than let callers proceed with
+    partial assets.
     """
     deadline = time.monotonic() + max_wait_seconds
     pending = repos
     attempt = 0
+    sleep_seconds = CLONE_RETRY_INITIAL_SLEEP_SECONDS
     while pending:
         attempt += 1
+        remaining = deadline - time.monotonic()
         skipped_paths = set(
-            batch_clone_git_repos(pending, lock_timeout_seconds=lock_timeout_seconds)
+            batch_clone_git_repos(
+                pending,
+                asset_caching_enabled=asset_caching_enabled or attempt > 1,
+                lock_timeout_seconds=max(1, min(lock_timeout_seconds, int(remaining))),
+            )
         )
         if not skipped_paths:
             return
         pending = [(url, path) for url, path in pending if path in skipped_paths]
-        if time.monotonic() >= deadline:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
             logger.error(
                 f"Gave up after {max_wait_seconds}s waiting on {len(pending)} repo(s) "
                 f"locked by other processes: {sorted(skipped_paths)}"
@@ -514,9 +529,12 @@ def clone_git_repos_until_complete(
             raise TimeoutError(
                 f"Timed out waiting for other processes to finish cloning: {sorted(skipped_paths)}"
             )
+        pause = min(sleep_seconds, remaining)
         logger.info(
-            f"Retrying {len(pending)} contended repo(s) (attempt {attempt + 1}): {sorted(skipped_paths)}"
+            f"Retrying {len(pending)} contended repo(s) in {pause:.1f}s (attempt {attempt + 1}): {sorted(skipped_paths)}"
         )
+        time.sleep(pause)
+        sleep_seconds = min(sleep_seconds * 2, CLONE_RETRY_MAX_SLEEP_SECONDS)
 
 
 # @worker.app.task

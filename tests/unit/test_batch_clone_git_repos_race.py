@@ -27,6 +27,7 @@ from doc.domain.resource_lookup import (
     batch_clone_git_repos,
     clone_git_repos_until_complete,
 )
+from doc.domain import resource_lookup as resource_lookup_module
 from filelock import FileLock
 
 pytestmark = pytest.mark.slow
@@ -224,6 +225,7 @@ def _hold_lock_and_clone_worker(
         ready.set()
         time.sleep(hold_seconds)
         subprocess.check_call(["git", "clone", "-q", "--depth=1", repo_url, dest])
+        (Path(dest) / "marker_from_holder_clone.txt").write_text("x")
 
 
 def test_skipped_repo_resolved_by_other_process_is_not_recloned(
@@ -302,7 +304,46 @@ def test_contention_beyond_ceiling_raises_instead_of_proceeding(
     with pytest.raises(TimeoutError):
         clone_git_repos_until_complete(
             [("file:///nonexistent-remote.git", dest)],  # type: ignore[list-item]
-            max_wait_seconds=1,
+            max_wait_seconds=1.5,
             lock_timeout_seconds=1,
         )
     holder.join(timeout=10)
+
+
+def test_retry_with_caching_disabled_does_not_reclone_peer_clone(
+    tmp_path: Path,
+) -> None:
+    bare_repo = tmp_path / "remote.git"
+    _make_bare_repo_with_content(bare_repo, 4)
+    repo_url = f"file://{bare_repo}"
+    dest = str(tmp_path / "dest_repo")
+
+    ctx = multiprocessing.get_context("fork")
+    ready = ctx.Event()
+    holder = ctx.Process(
+        target=_hold_lock_and_clone_worker, args=(repo_url, dest, 2.0, ready)
+    )
+    holder.start()
+    assert ready.wait(timeout=5)
+
+    calls: list[bool] = []
+    marker = Path(dest) / "marker_from_holder_clone.txt"
+    real = resource_lookup_module.batch_clone_git_repos
+
+    def spy(*args: Any, **kwargs: Any) -> list[str]:
+        calls.append(kwargs["asset_caching_enabled"])
+        return real(*args, **kwargs)
+
+    resource_lookup_module.batch_clone_git_repos = spy  # type: ignore[assignment]
+    try:
+        clone_git_repos_until_complete(
+            [(repo_url, dest)],  # type: ignore[list-item]
+            lock_timeout_seconds=1,
+            asset_caching_enabled=False,
+        )
+    finally:
+        resource_lookup_module.batch_clone_git_repos = real  # type: ignore[assignment]
+    holder.join(timeout=10)
+    assert calls[0] is False
+    assert len(calls) > 1 and all(calls[1:])
+    assert marker.exists()
