@@ -509,14 +509,21 @@ def clone_git_repos_until_complete(
     sleep_seconds = CLONE_RETRY_INITIAL_SLEEP_SECONDS
     while pending:
         attempt += 1
-        remaining = deadline - time.monotonic()
-        skipped_paths = set(
-            batch_clone_git_repos(
-                pending,
-                asset_caching_enabled=asset_caching_enabled or attempt > 1,
-                lock_timeout_seconds=max(1, min(lock_timeout_seconds, int(remaining))),
+        skipped_paths: set[str] = set()
+        for repo in pending:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                skipped_paths.add(repo[1])
+                continue
+            skipped_paths.update(
+                batch_clone_git_repos(
+                    [repo],
+                    asset_caching_enabled=asset_caching_enabled or attempt > 1,
+                    lock_timeout_seconds=max(
+                        1, min(lock_timeout_seconds, int(remaining))
+                    ),
+                )
             )
-        )
         if not skipped_paths:
             return
         pending = [(url, path) for url, path in pending if path in skipped_paths]
