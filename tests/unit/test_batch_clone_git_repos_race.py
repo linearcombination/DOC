@@ -334,7 +334,7 @@ def test_retry_with_caching_disabled_does_not_reclone_peer_clone(
         calls.append(kwargs["asset_caching_enabled"])
         return real(*args, **kwargs)
 
-    resource_lookup_module.batch_clone_git_repos = spy  # type: ignore[assignment]
+    resource_lookup_module.batch_clone_git_repos = spy
     try:
         clone_git_repos_until_complete(
             [(repo_url, dest)],  # type: ignore[list-item]
@@ -342,7 +342,7 @@ def test_retry_with_caching_disabled_does_not_reclone_peer_clone(
             asset_caching_enabled=False,
         )
     finally:
-        resource_lookup_module.batch_clone_git_repos = real  # type: ignore[assignment]
+        resource_lookup_module.batch_clone_git_repos = real
     holder.join(timeout=10)
     assert calls[0] is False
     assert len(calls) > 1 and all(calls[1:])
