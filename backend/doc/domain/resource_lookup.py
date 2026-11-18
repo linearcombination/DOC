@@ -544,7 +544,6 @@ def clone_git_repos_until_complete(
         sleep_seconds = min(sleep_seconds * 2, CLONE_RETRY_MAX_SLEEP_SECONDS)
 
 
-# @worker.app.task
 def batch_clone_git_repos(
     repos: list[tuple[HttpUrl, str]],
     asset_caching_enabled: bool = settings.ASSET_CACHING_ENABLED,
