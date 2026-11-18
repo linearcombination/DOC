@@ -39,3 +39,16 @@ class MissingChapterMarkerError(Exception):
 
     def __init__(self, message: str):
         self.message: str = message
+
+
+@final
+class AssetCloneContentionTimeout(TimeoutError):
+    """Raised when repos stay locked by other processes past the wait ceiling."""
+
+    def __init__(self, contended_paths: list[str], waited_seconds: float) -> None:
+        self.contended_paths = contended_paths
+        self.waited_seconds = waited_seconds
+        super().__init__(
+            f"Timed out after {waited_seconds}s waiting for other processes "
+            f"to finish cloning: {contended_paths}"
+        )

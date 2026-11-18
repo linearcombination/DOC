@@ -10,7 +10,6 @@ from fastapi.responses import JSONResponse
 from passages.entrypoints.routes import router as passages_router
 from stet.entrypoints.routes import router as stet_router
 
-
 app = FastAPI()
 
 
@@ -65,6 +64,25 @@ async def validation_exception_handler(
     content = {"status_code": 10422, "message": exc_str, "data": None}
     return JSONResponse(
         content=content, status_code=status.HTTP_422_UNPROCESSABLE_ENTITY
+    )
+
+
+CLONE_CONTENTION_RETRY_AFTER_SECONDS = 30  # tune to your typical clone duration
+
+
+@app.exception_handler(exceptions.AssetCloneContentionTimeout)
+async def clone_contention_timeout_handler(
+    request: Request, exc: exceptions.AssetCloneContentionTimeout
+) -> JSONResponse:
+    # The details are already logged at the raise site. Don't send server
+    # file paths to the client.
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": str(CLONE_CONTENTION_RETRY_AFTER_SECONDS)},
+        content={
+            "detail": "Required resources are still being prepared by another "
+            "request. Please retry shortly."
+        },
     )
 
 

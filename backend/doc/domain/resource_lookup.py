@@ -17,13 +17,14 @@ from typing import Mapping, Optional, Sequence
 import requests
 from cachetools import TTLCache, cached
 from doc.config import settings
+from doc.domain import worker
+from doc.domain.bible_books import BOOK_CHAPTERS, BOOK_ID_MAP, BOOK_NAMES
 from doc.domain.constants import (
     GATEWAY_LANGUAGES,
     RESOURCE_TYPE_CODES_AND_NAMES,
     USFM_RESOURCE_TYPES,
 )
-from doc.domain import worker
-from doc.domain.bible_books import BOOK_CHAPTERS, BOOK_ID_MAP, BOOK_NAMES
+from doc.domain.exceptions import AssetCloneContentionTimeout
 from doc.domain.model import (
     NON_USFM_RESOURCE_TYPES,
     Content,
@@ -533,9 +534,7 @@ def clone_git_repos_until_complete(
                 f"Gave up after {max_wait_seconds}s waiting on {len(pending)} repo(s) "
                 f"locked by other processes: {sorted(skipped_paths)}"
             )
-            raise TimeoutError(
-                f"Timed out waiting for other processes to finish cloning: {sorted(skipped_paths)}"
-            )
+            raise AssetCloneContentionTimeout(sorted(skipped_paths), max_wait_seconds)
         pause = min(sleep_seconds, remaining)
         logger.info(
             f"Retrying {len(pending)} contended repo(s) in {pause:.1f}s (attempt {attempt + 1}): {sorted(skipped_paths)}"
